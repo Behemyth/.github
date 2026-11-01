@@ -1,0 +1,412 @@
+name: Native Check
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version used by PDM and the project tooling.
+        type: string
+        default: "3.15"
+      fast-runner:
+        description: Runner label for the fast stage.
+        type: string
+        default: ubuntu-26.04
+      fast-install:
+        description: Dependency installation command for the fast stage.
+        type: string
+        default: pdm install
+      fast-command:
+        description: Cheap checks that must pass before native lanes start.
+        type: string
+        required: true
+      fast-uses-cmake:
+        description: Install the pinned CMake before the fast stage.
+        type: boolean
+        default: false
+      native-lanes:
+        description: >-
+          JSON array of lanes. Each lane needs name, runner, toolchain, and command.
+          Optional fields: install. Toolchain is msvc or llvm-libcxx. Windows and Linux
+          runners may be x64 or arm64; macOS runners must be arm64. Callers should also
+          run on push to their base branch, because only push runs save the Conan cache.
+        type: string
+        required: true
+      cmake-version:
+        description: Exact CMake release to install for every native lane.
+        type: string
+        default: 4.5.0-rc2
+      llvm-version:
+        description: Upstream LLVM major version for llvm-libcxx lanes.
+        type: string
+        default: "23"
+
+permissions:
+  contents: read
+
+jobs:
+  fast:
+    name: fast
+    runs-on: ${{ inputs.fast-runner }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install PDM
+        uses: pdm-project/setup-pdm@544d7237314ee09c256785bd360f6b30add38b37 # v4
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: true
+
+      - name: Install pinned CMake
+        if: inputs.fast-uses-cmake
+        shell: bash
+        env:
+          CMAKE_VERSION: ${{ inputs.cmake-version }}
+        run: &install-cmake |
+          python - <<'PY'
+          import hashlib
+          import os
+          import platform
+          import shutil
+          import tarfile
+          import urllib.request
+          import zipfile
+          from pathlib import Path
+
+          version = os.environ["CMAKE_VERSION"]
+          checksums = {
+              "4.5.0-rc2": {
+                  "linux-aarch64.tar.gz": "eb9e34098b07e1b86bd744a624c67cda19bf3be800e6baea702e9c01305c7663",
+                  "linux-x86_64.tar.gz": "5d763a6b0b1ab67588734f14734dec1a3957b491750b46804b2a13b9e9e0a75a",
+                  "macos-universal.tar.gz": "864c2536079578a88705000254b1a0fac2eb8e84f5ee4c53ee231b5884283cb6",
+                  "windows-arm64.zip": "66d323b85c00e66ec9fc0965d67eb944d2ec2e5b0b217d325f8ac93878ea5da1",
+                  "windows-x86_64.zip": "251e58d8e9e4c257e305b9cabb59abe0389d3790fc28d4269306e5197f01c372",
+              }
+          }
+          system = platform.system()
+          machine = platform.machine().lower()
+          if system == "Linux" and machine in {"x86_64", "amd64"}:
+              asset = "linux-x86_64.tar.gz"
+              binary = "bin/cmake"
+          elif system == "Linux" and machine in {"aarch64", "arm64"}:
+              asset = "linux-aarch64.tar.gz"
+              binary = "bin/cmake"
+          elif system == "Darwin":
+              asset = "macos-universal.tar.gz"
+              binary = "CMake.app/Contents/bin/cmake"
+          elif system == "Windows" and machine in {"x86_64", "amd64"}:
+              asset = "windows-x86_64.zip"
+              binary = "bin/cmake.exe"
+          elif system == "Windows" and machine in {"arm64", "aarch64"}:
+              asset = "windows-arm64.zip"
+              binary = "bin/cmake.exe"
+          else:
+              raise SystemExit(f"No pinned CMake archive for {system}/{machine}")
+
+          try:
+              expected = checksums[version][asset]
+          except KeyError as error:
+              raise SystemExit(f"CMake {version} has no pinned checksum for {asset}") from error
+
+          archive_name = f"cmake-{version}-{asset}"
+          temp = Path(os.environ["RUNNER_TEMP"])
+          archive = temp / archive_name
+          url = f"https://github.com/Kitware/CMake/releases/download/v{version}/{archive_name}"
+          with urllib.request.urlopen(url, timeout=120) as response, archive.open("wb") as output:
+              shutil.copyfileobj(response, output)
+
+          actual = hashlib.sha256(archive.read_bytes()).hexdigest()
+          if actual != expected:
+              raise SystemExit(f"Checksum mismatch for {archive_name}: {actual}")
+
+          destination = temp / f"cmake-{version}"
+          shutil.rmtree(destination, ignore_errors=True)
+          destination.mkdir()
+          if archive.suffix == ".zip":
+              with zipfile.ZipFile(archive) as package:
+                  package.extractall(destination)
+          else:
+              with tarfile.open(archive) as package:
+                  package.extractall(destination, filter="data")
+
+          roots = [path for path in destination.iterdir() if path.is_dir()]
+          if len(roots) != 1:
+              raise SystemExit(f"Expected one CMake archive root, found {roots}")
+          cmake = roots[0] / binary
+          if not cmake.is_file():
+              raise SystemExit(f"CMake executable missing from archive: {cmake}")
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write(f"CMAKE_BINARY={cmake}\n")
+          PY
+
+      - name: Install dependencies
+        shell: bash
+        run: ${{ inputs.fast-install }}
+
+      - name: Run fast checks
+        shell: bash
+        run: ${{ inputs.fast-command }}
+
+      - name: Summarize fast stage
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Fast stage"
+            echo "- Runner: ${{ runner.os }} ${{ runner.arch }} ($ImageOS $ImageVersion)"
+            echo "- Python: $(python --version 2>&1)"
+            if [[ -n "${CMAKE_BINARY:-}" ]]; then
+              python -c 'import os, subprocess; print("- CMake: " + subprocess.run([os.environ["CMAKE_BINARY"], "--version"], check=True, capture_output=True, text=True).stdout.splitlines()[0])'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  native:
+    name: native (${{ matrix.lane.name }})
+    needs: fast
+    runs-on: ${{ matrix.lane.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(inputs.native-lanes) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install PDM
+        uses: pdm-project/setup-pdm@544d7237314ee09c256785bd360f6b30add38b37 # v4
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: true
+
+      - name: Install pinned CMake
+        shell: bash
+        env:
+          CMAKE_VERSION: ${{ inputs.cmake-version }}
+        run: *install-cmake
+
+      - name: Install upstream LLVM on Ubuntu
+        if: matrix.lane.toolchain == 'llvm-libcxx' && runner.os == 'Linux'
+        shell: bash
+        env:
+          LLVM_VERSION: ${{ inputs.llvm-version }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/apt.llvm.org.asc"
+          keyring="$RUNNER_TEMP/apt.llvm.org.gpg"
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o "$key"
+          fingerprint="$(gpg --show-keys --with-colons "$key" | awk -F: '$1 == "fpr" { print $10; exit }')"
+          if [[ "$fingerprint" != "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421" ]]; then
+            echo "Unexpected apt.llvm.org key fingerprint: $fingerprint" >&2
+            exit 1
+          fi
+          gpg --dearmor --output "$keyring" "$key"
+          sudo install -D -m 0644 "$keyring" /etc/apt/keyrings/apt.llvm.org.gpg
+          codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+          echo "deb [signed-by=/etc/apt/keyrings/apt.llvm.org.gpg] http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-${LLVM_VERSION} main" \
+            | sudo tee /etc/apt/sources.list.d/apt.llvm.org.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            "clang-${LLVM_VERSION}" "libc++-${LLVM_VERSION}-dev" "libc++abi-${LLVM_VERSION}-dev" "lld-${LLVM_VERSION}"
+          echo "LLVM_ROOT=/usr/lib/llvm-${LLVM_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install upstream LLVM on macOS
+        if: matrix.lane.toolchain == 'llvm-libcxx' && runner.os == 'macOS'
+        shell: bash
+        env:
+          LLVM_VERSION: ${{ inputs.llvm-version }}
+        run: |
+          set -euo pipefail
+          # Homebrew ships the newest LLVM major as the unversioned formula.
+          formula="llvm"
+          if brew info --json=v2 "llvm@${LLVM_VERSION}" >/dev/null 2>&1; then
+            formula="llvm@${LLVM_VERSION}"
+          fi
+          brew install "$formula"
+          root="$(brew --prefix "$formula")"
+          major="$("$root/bin/clang" -dumpversion | cut -d. -f1)"
+          if [[ "$major" != "$LLVM_VERSION" ]]; then
+            echo "Homebrew $formula provides LLVM $major, expected $LLVM_VERSION" >&2
+            exit 1
+          fi
+          echo "LLVM_ROOT=$root" >> "$GITHUB_ENV"
+
+      - name: Load MSVC developer environment
+        if: matrix.lane.toolchain == 'msvc'
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $target = switch ($env:RUNNER_ARCH) {
+            'X64' { @{ Component = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'; Script = 'vcvars64.bat' } }
+            'ARM64' { @{ Component = 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'; Script = 'vcvarsarm64.bat' } }
+            default { throw "Unsupported Windows runner architecture: $env:RUNNER_ARCH" }
+          }
+          $installation = & $vswhere -latest -prerelease -products * -requires $target.Component -property installationPath
+          if (-not $installation) { throw "No Visual Studio installation with $($target.Component) was found." }
+          $vcvars = Join-Path $installation "VC\Auxiliary\Build\$($target.Script)"
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          $lines = & $env:ComSpec /d /s /c "`"$vcvars`" >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw "$($target.Script) failed with exit code $LASTEXITCODE" }
+          foreach ($line in $lines) {
+            $name, $value = $line -split '=', 2
+            if ($name -and $before[$name] -ne $value) {
+              "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            }
+          }
+
+      - name: Configure isolated Conan profile
+        shell: bash
+        env:
+          LLVM_VERSION: ${{ inputs.llvm-version }}
+          TOOLCHAIN: ${{ matrix.lane.toolchain }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import platform
+          from pathlib import Path
+
+          home = Path(os.environ["RUNNER_TEMP"]) / "conan-home"
+          profiles = home / "profiles"
+          profiles.mkdir(parents=True, exist_ok=True)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write(f"CONAN_HOME={home}\n")
+
+          if os.environ["TOOLCHAIN"] == "msvc":
+              raise SystemExit(0)
+          if os.environ["TOOLCHAIN"] != "llvm-libcxx":
+              raise SystemExit(f"Unsupported toolchain: {os.environ['TOOLCHAIN']}")
+
+          (home / "settings_user.yml").write_text(
+              f'compiler:\n  clang:\n    version: ["{os.environ["LLVM_VERSION"]}"]\n',
+              encoding="utf-8",
+          )
+          root = Path(os.environ["LLVM_ROOT"])
+          system = platform.system()
+          conan_os = {"Linux": "Linux", "Darwin": "Macos"}[system]
+          conan_arch = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "armv8", "aarch64": "armv8"}[
+              platform.machine().lower()
+          ]
+          executables = {"c": str(root / "bin/clang"), "cpp": str(root / "bin/clang++")}
+          lines = [
+              "[settings]",
+              f"os={conan_os}",
+              f"arch={conan_arch}",
+              "build_type=Release",
+              "compiler=clang",
+              f"compiler.version={os.environ['LLVM_VERSION']}",
+              "compiler.libcxx=libc++",
+              "compiler.cppstd=23",
+              "[conf]",
+              f"tools.build:compiler_executables={json.dumps(executables)}",
+          ]
+          if system == "Darwin":
+              link_flags = [
+                  f"-L{root / 'lib/c++'}",
+                  f"-Wl,-rpath,{root / 'lib/c++'}",
+                  f"-L{root / 'lib/unwind'}",
+                  "-lunwind",
+              ]
+              lines.extend(
+                  [
+                      f"tools.build:exelinkflags={json.dumps(link_flags)}",
+                      f"tools.build:sharedlinkflags={json.dumps(link_flags)}",
+                  ]
+              )
+          profile = "\n".join(lines) + "\n"
+          for name in ("default", "build"):
+              (profiles / name).write_text(profile, encoding="utf-8")
+          PY
+
+      - name: Restore Conan package cache
+        id: conan-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/conan-home/p
+          key: conan-${{ matrix.lane.name }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('conanfile*.py', 'pyproject.toml', 'pdm.lock') }}
+          restore-keys: |
+            conan-${{ matrix.lane.name }}-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install dependencies
+        shell: bash
+        run: ${{ matrix.lane.install || 'pdm install' }}
+
+      - name: Run native lane
+        shell: bash
+        run: ${{ matrix.lane.command }}
+
+      # Only base-branch pushes save, so PR and merge-queue runs can't seed the shared cache.
+      - name: Save Conan package cache
+        if: success() && github.event_name == 'push' && steps.conan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/conan-home/p
+          key: ${{ steps.conan-cache.outputs.cache-primary-key }}
+
+      - name: Summarize native lane
+        if: always()
+        shell: bash
+        env:
+          LANE: ${{ matrix.lane.name }}
+          TOOLCHAIN: ${{ matrix.lane.toolchain }}
+        run: |
+          {
+            echo "### Native lane: $LANE"
+            echo "- Runner: ${{ runner.os }} ${{ runner.arch }} ($ImageOS $ImageVersion)"
+            echo "- Toolchain: $TOOLCHAIN"
+            python - <<'PY'
+          import hashlib
+          import os
+          import subprocess
+          from pathlib import Path
+
+          binary = os.environ.get("CMAKE_BINARY")
+          if binary and Path(binary).is_file():
+              version = subprocess.run([binary, "--version"], check=True, capture_output=True, text=True).stdout.splitlines()[0]
+              digest = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
+              print(f"- CMake: {version}, origin `environment`, SHA-256 `{digest}`")
+
+          home = os.environ.get("CONAN_HOME")
+          profile = Path(home, "profiles", "default") if home else None
+          if profile and profile.is_file():
+              print("- Conan profile:")
+              print("```ini")
+              print(profile.read_text(encoding="utf-8").rstrip())
+              print("```")
+          PY
+            if [[ -n "${LLVM_ROOT:-}" && -x "$LLVM_ROOT/bin/clang++" ]]; then
+              echo "- Compiler: $("$LLVM_ROOT/bin/clang++" --version | head -n 1)"
+            fi
+            if [[ "$TOOLCHAIN" == "msvc" ]]; then
+              vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+              if [[ -x "$vswhere" ]]; then
+                echo "- Visual Studio: $("$vswhere" -latest -prerelease -products '*' -property catalog_productDisplayVersion)"
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  ci-result:
+    name: ci-result
+    if: always()
+    needs: [fast, native]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Require every stage to succeed
+        shell: bash
+        env:
+          FAST_RESULT: ${{ needs.fast.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+        run: |
+          echo "fast=$FAST_RESULT native=$NATIVE_RESULT"
+          [[ "$FAST_RESULT" == "success" && "$NATIVE_RESULT" == "success" ]]

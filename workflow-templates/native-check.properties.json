@@ -1,0 +1,9 @@
+{
+    "name": "Synodic Check Native Status",
+    "description": "Fast checks followed by Windows MSVC, Ubuntu LLVM/libc++, and macOS LLVM/libc++ native lanes.",
+    "iconName": "c++",
+    "categories": [
+        "C++",
+        "Python"
+    ]
+}
