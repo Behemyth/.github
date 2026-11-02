@@ -39,9 +39,18 @@ on:
         description: Upstream LLVM major version for llvm-libcxx lanes.
         type: string
         default: "23"
+      strict-warnings:
+        description: >-
+          Treat compiler warnings as errors by exporting SYNODIC_STRICT_WARNINGS, which the
+          shared CMake presets map to CMAKE_COMPILE_WARNING_AS_ERROR. Local builds leave it unset.
+        type: boolean
+        default: true
 
 permissions:
   contents: read
+
+env:
+  SYNODIC_STRICT_WARNINGS: ${{ inputs.strict-warnings && 'ON' || 'OFF' }}
 
 jobs:
   fast:
@@ -363,6 +372,7 @@ jobs:
             echo "### Native lane: $LANE"
             echo "- Runner: ${{ runner.os }} ${{ runner.arch }} ($ImageOS $ImageVersion)"
             echo "- Toolchain: $TOOLCHAIN"
+            echo "- Strict warnings: $SYNODIC_STRICT_WARNINGS"
             python - <<'PY'
           import hashlib
           import os
