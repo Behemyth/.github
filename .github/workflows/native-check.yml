@@ -488,9 +488,12 @@ jobs:
         shell: bash
         run: ${{ inputs.native-command }}
 
-      # Only base-branch pushes save, so PR and merge-queue runs can't seed the shared cache.
+      # Only manual runs on the default branch save, so PR and merge-queue runs can't seed the shared cache.
       - name: Save Conan package cache
-        if: success() && github.event_name == 'push' && steps.conan-cache.outputs.cache-hit != 'true'
+        if: >-
+          success() && github.event_name == 'workflow_dispatch'
+          && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+          && steps.conan-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/conan-home/p
