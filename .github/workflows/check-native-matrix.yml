@@ -15,6 +15,6 @@ jobs:
         with:
           persist-credentials: false
       - name: Install native test tools
-        run: python -m pip install "cmake==4.5.0rc2" "ninja==1.13.0"
+        run: python -m pip install "cmake==4.4.4" "ninja==1.13.0"
       - name: Test matrix and native result contracts
         run: python -m unittest discover -s tests -v
