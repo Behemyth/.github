@@ -518,7 +518,7 @@ jobs:
         shell: bash
         env:
           NATIVE_CHECK_COMMAND: ${{ inputs.native-install }}
-        run: python .native-workflow/.github/scripts/native_check.py run --stage install
+        run: python .native-workflow/.github/scripts/native_check.py run --shell "$BASH" --stage install
 
       - name: Prepare native dependencies
         id: prepare
@@ -527,7 +527,7 @@ jobs:
         env:
           CPPYTHON_IDENTITY: ${{ matrix.identity }}
           NATIVE_CHECK_COMMAND: ${{ inputs.native-prepare }}
-        run: python .native-workflow/.github/scripts/native_check.py run --stage prepare
+        run: python .native-workflow/.github/scripts/native_check.py run --shell "$BASH" --stage prepare
 
       - name: Run committed CMake steps and single-config configure checks
         id: cmake
@@ -543,7 +543,7 @@ jobs:
         shell: bash
         env:
           NATIVE_CHECK_COMMAND: ${{ inputs.native-command }}
-        run: python .native-workflow/.github/scripts/native_check.py run --stage native-command
+        run: python .native-workflow/.github/scripts/native_check.py run --shell "$BASH" --stage native-command
 
       # Only manual runs on the default branch save, so PR and merge-queue runs can't seed the shared cache.
       - name: Save Conan package cache

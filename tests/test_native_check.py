@@ -4,7 +4,9 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -93,6 +95,23 @@ class NativeCheckTests(TemporaryProject):
             self.assertEqual(cancelled["status"], "cancelled")
         self.assertTrue((self.output / "diagnostics.sarif").exists())
 
+    def test_command_success_schema_and_skipped_execution_are_explicit(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            native_check.run_stage(
+                self.source, self.output, "native-command", [sys.executable, "-c", "print('passed')"],
+            )
+            result = native_check.report(self.source, self.output, "probe", "msvc", "success", {})
+            self.assertEqual(result["schema_version"], 1)
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["stages"][0]["returncode"], 0)
+            self.assertEqual(result["diagnostics"], [])
+            stage = self.output / "stage-native-command.json"
+            document = json.loads(stage.read_text())
+            document["status"] = "skipped"
+            stage.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError, "unsuccessful"):
+                native_check.report(self.source, self.output, "probe", "msvc", "success", {})
+
     def test_dev_drive_output_is_remapped_for_annotations_only(self):
         original = self.source / "original-checkout"
         text = str(self.source / "src" / "file.cpp") + ":4:2: error: a failure"
@@ -101,6 +120,26 @@ class NativeCheckTests(TemporaryProject):
             native_check.run_stage(self.source, self.output, "probe", [sys.executable, "-c", f"print({text!r})"])
         self.assertIn(str(original), console.getvalue())
         self.assertIn(str(self.source / "src"), (self.output / "probe.log").read_text())
+
+    def test_explicit_bash_cli_streams_output_and_preserves_pipe_failure(self):
+        bash = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+        shell = str(bash) if os.name == "nt" and bash.is_file() else shutil.which("bash")
+        if shell is None:
+            self.skipTest("Bash is required for command-mode CI")
+        environment = dict(
+            os.environ, NATIVE_WORKSPACE=str(self.source), NATIVE_IDENTITY="probe",
+            NATIVE_CHECK_COMMAND="printf 'from bash\\n'; false | cat",
+        )
+        command = shlex.join([sys.executable, str(SCRIPT), "run", "--stage", "install"])
+        result = subprocess.run(
+            [shell, "--noprofile", "--norc", "-c", command + ' --shell "$BASH"'],
+            env=environment, capture_output=True, text=True, encoding="utf-8",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("from bash", result.stdout)
+        recorded = json.loads((self.output / "stage-install.json").read_text())
+        self.assertEqual(recorded["returncode"], 1)
+        self.assertEqual(recorded["status"], "failure")
 
 
 @unittest.skipUnless(shutil.which("cmake") and shutil.which("ninja"), "CMake 4.4+ and Ninja are required")

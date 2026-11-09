@@ -264,7 +264,10 @@ def report(
     failed = next((stage["stage"] for stage in stages if stage["status"] == "failure"), None)
     failed = failed or next((name for name, outcome in outcomes.items() if outcome == "failure"), None)
     complete = any(stage["stage"] == "native-command" or stage["stage"].startswith("test-") for stage in stages)
-    status = "success" if job_status == "success" and complete and not failed else "failure"
+    status = "success" if (
+        job_status == "success" and complete and not failed
+        and all(stage["status"] == "success" for stage in stages)
+    ) else "failure"
     if job_status == "cancelled":
         status = "cancelled"
     cmake_lane = any(stage["stage"] == "configure-multi" for stage in stages)
@@ -311,8 +314,8 @@ def report(
         with Path(path).open("a", encoding="utf-8") as handle:
             handle.write(summary)
     print(summary)
-    if not complete and job_status == "success":
-        raise ValueError("No native execution was recorded; refusing to report an empty lane as successful")
+    if job_status == "success" and status != "success":
+        raise ValueError("Missing or unsuccessful native execution; refusing to report an empty lane as successful")
     return result
 
 
@@ -321,6 +324,7 @@ def main() -> int:
     subcommands = parser.add_subparsers(dest="action", required=True)
     command = subcommands.add_parser("run")
     command.add_argument("--stage", required=True)
+    command.add_argument("--shell", required=True, help="The invoking Bash executable, not a PATH lookup.")
     cmake = subcommands.add_parser("cmake")
     cmake.add_argument("--configurations", nargs="+", required=True)
     summary = subcommands.add_parser("report")
@@ -331,7 +335,7 @@ def main() -> int:
     if args.action == "run":
         result = run_stage(
             source, output, args.stage,
-            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", os.environ["NATIVE_CHECK_COMMAND"]],
+            [args.shell, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", os.environ["NATIVE_CHECK_COMMAND"]],
         )
         return result["returncode"]
     if args.action == "cmake":
