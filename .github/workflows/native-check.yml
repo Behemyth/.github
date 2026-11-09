@@ -23,14 +23,42 @@ on:
         description: Install the pinned CMake before the fast stage.
         type: boolean
         default: false
-      native-lanes:
-        description: >-
-          JSON array of lanes. Each lane needs name, runner, toolchain, and command.
-          Optional fields: install. Toolchain is msvc or llvm-libcxx. Windows and Linux
-          runners may be x64 or arm64; macOS runners must be arm64. Callers should also
-          run on push to their base branch, because only push runs save the Conan cache.
+      native-identities:
+        description: JSON array of canonical build identity names.
         type: string
         required: true
+      target-identity:
+        description: Run only this declared identity for a non-required manual check.
+        type: string
+        default: ""
+      targeted:
+        description: Require exactly one target for a manual development check.
+        type: boolean
+        default: false
+      native-mode:
+        description: Use committed CMake workflows or a project-wide command.
+        type: string
+        default: cmake
+      native-install:
+        description: Python dependency installation command for native jobs.
+        type: string
+        default: pdm install
+      native-prepare:
+        description: Prepare native dependencies before CMake workflows.
+        type: string
+        default: pdm run prepare
+      native-command:
+        description: Project-wide native command used in command mode.
+        type: string
+        default: pdm run test
+      configuration-repository:
+        description: Public configuration fork containing the canonical identity table.
+        type: string
+        default: Behemyth/configuration
+      configuration-ref:
+        description: Configuration fork ref containing the identity table.
+        type: string
+        default: feature/identity-presets
       cmake-version:
         description: Exact CMake release to install for every native lane.
         type: string
@@ -174,20 +202,88 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-  native:
-    name: native (${{ matrix.lane.name }})
+  preflight:
+    name: matrix preflight
     needs: fast
-    runs-on: ${{ matrix.lane.runner }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Checkout caller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout this workflow's exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .native-workflow
+          persist-credentials: false
+
+      - name: Checkout canonical configuration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.configuration-repository }}
+          ref: ${{ inputs.configuration-ref }}
+          path: .native-configuration
+          persist-credentials: false
+
+      - name: Install PDM and Python
+        uses: pdm-project/setup-pdm@544d7237314ee09c256785bd360f6b30add38b37 # v4
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: false
+
+      - name: Install template renderer
+        run: python -m pip install "jinja2>=3.1,<4"
+
+      - name: Validate identities and resolve runners
+        id: resolve
+        shell: bash
+        env:
+          IDENTITIES: ${{ inputs.native-identities }}
+          TARGET_IDENTITY: ${{ inputs.target-identity }}
+          TARGETED: ${{ inputs.targeted }}
+          NATIVE_MODE: ${{ inputs.native-mode }}
+        run: |
+          if [[ "$TARGETED" == "true" && "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]]; then
+            echo "Targeted checks are only permitted for workflow_dispatch" >&2
+            exit 1
+          fi
+          python .native-workflow/.github/scripts/native_matrix.py resolve \
+            --configuration .native-configuration \
+            --consumer tool/identities.toml \
+            --selection "$IDENTITIES" \
+            --target "$TARGET_IDENTITY" \
+            --targeted "$TARGETED" \
+            --mode "$NATIVE_MODE"
+
+  native:
+    name: native (${{ matrix.identity }})
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    env:
+      CPPYTHON_IDENTITY: ${{ matrix.identity }}
     strategy:
       fail-fast: false
-      matrix:
-        lane: ${{ fromJSON(inputs.native-lanes) }}
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - name: Checkout this workflow's exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .native-workflow
           persist-credentials: false
 
       - name: Install PDM
@@ -203,7 +299,7 @@ jobs:
         run: *install-cmake
 
       - name: Install upstream LLVM on Ubuntu
-        if: matrix.lane.toolchain == 'llvm-libcxx' && runner.os == 'Linux'
+        if: matrix.toolchain == 'llvm-libcxx' && runner.os == 'Linux'
         shell: bash
         env:
           LLVM_VERSION: ${{ inputs.llvm-version }}
@@ -226,9 +322,10 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             "clang-${LLVM_VERSION}" "libc++-${LLVM_VERSION}-dev" "libc++abi-${LLVM_VERSION}-dev" "lld-${LLVM_VERSION}"
           echo "LLVM_ROOT=/usr/lib/llvm-${LLVM_VERSION}" >> "$GITHUB_ENV"
+          echo "/usr/lib/llvm-${LLVM_VERSION}/bin" >> "$GITHUB_PATH"
 
       - name: Install upstream LLVM on macOS
-        if: matrix.lane.toolchain == 'llvm-libcxx' && runner.os == 'macOS'
+        if: matrix.toolchain == 'llvm-libcxx' && runner.os == 'macOS'
         shell: bash
         env:
           LLVM_VERSION: ${{ inputs.llvm-version }}
@@ -247,9 +344,10 @@ jobs:
             exit 1
           fi
           echo "LLVM_ROOT=$root" >> "$GITHUB_ENV"
+          echo "$root/bin" >> "$GITHUB_PATH"
 
       - name: Load MSVC developer environment
-        if: matrix.lane.toolchain == 'msvc'
+        if: matrix.toolchain == 'msvc'
         shell: pwsh
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -272,11 +370,24 @@ jobs:
             }
           }
 
+      - name: Verify runner and compiler identity
+        shell: bash
+        env:
+          EXPECTED_OS: ${{ matrix.os }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_COMPILER: ${{ matrix.compiler }}
+          LLVM_VERSION: ${{ inputs.llvm-version }}
+        run: |
+          python .native-workflow/.github/scripts/native_matrix.py verify \
+            --identity "$CPPYTHON_IDENTITY" --os "$EXPECTED_OS" \
+            --arch "$EXPECTED_ARCH" --compiler "$EXPECTED_COMPILER" \
+            --llvm-version "$LLVM_VERSION"
+
       - name: Configure isolated Conan profile
         shell: bash
         env:
           LLVM_VERSION: ${{ inputs.llvm-version }}
-          TOOLCHAIN: ${{ matrix.lane.toolchain }}
+          TOOLCHAIN: ${{ matrix.toolchain }}
         run: |
           python - <<'PY'
           import json
@@ -341,17 +452,39 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/conan-home/p
-          key: conan-${{ matrix.lane.name }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('conanfile*.py', 'pyproject.toml', 'pdm.lock') }}
+          key: conan-${{ matrix.identity }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('conanfile*.py', 'pyproject.toml', 'pdm.lock') }}
           restore-keys: |
-            conan-${{ matrix.lane.name }}-${{ runner.os }}-${{ runner.arch }}-
+            conan-${{ matrix.identity }}-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install dependencies
         shell: bash
-        run: ${{ matrix.lane.install || 'pdm install' }}
+        run: ${{ inputs.native-install }}
 
-      - name: Run native lane
+      - name: Prepare native dependencies
+        if: inputs.native-mode == 'cmake'
         shell: bash
-        run: ${{ matrix.lane.command }}
+        run: ${{ inputs.native-prepare }}
+
+      - name: Run multi-config CMake workflow
+        if: inputs.native-mode == 'cmake'
+        shell: bash
+        run: pdm run "$CMAKE_BINARY" --workflow --preset "$CPPYTHON_IDENTITY"
+
+      - name: Run representative single-config CMake workflows
+        if: inputs.native-mode == 'cmake' && matrix.single
+        shell: bash
+        env:
+          CONFIGURATIONS: ${{ join(matrix.configurations, ' ') }}
+        run: |
+          set -euo pipefail
+          for configuration in $CONFIGURATIONS; do
+            pdm run "$CMAKE_BINARY" --workflow --preset "$CPPYTHON_IDENTITY-$configuration"
+          done
+
+      - name: Run project-wide native command
+        if: inputs.native-mode == 'command'
+        shell: bash
+        run: ${{ inputs.native-command }}
 
       # Only base-branch pushes save, so PR and merge-queue runs can't seed the shared cache.
       - name: Save Conan package cache
@@ -365,8 +498,8 @@ jobs:
         if: always()
         shell: bash
         env:
-          LANE: ${{ matrix.lane.name }}
-          TOOLCHAIN: ${{ matrix.lane.toolchain }}
+          LANE: ${{ matrix.identity }}
+          TOOLCHAIN: ${{ matrix.toolchain }}
         run: |
           {
             echo "### Native lane: $LANE"
@@ -407,7 +540,7 @@ jobs:
   ci-result:
     name: ci-result
     if: always()
-    needs: [fast, native]
+    needs: [fast, preflight, native]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -416,7 +549,8 @@ jobs:
         shell: bash
         env:
           FAST_RESULT: ${{ needs.fast.result }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
         run: |
-          echo "fast=$FAST_RESULT native=$NATIVE_RESULT"
-          [[ "$FAST_RESULT" == "success" && "$NATIVE_RESULT" == "success" ]]
+          echo "fast=$FAST_RESULT preflight=$PREFLIGHT_RESULT native=$NATIVE_RESULT"
+          [[ "$FAST_RESULT" == "success" && "$PREFLIGHT_RESULT" == "success" && "$NATIVE_RESULT" == "success" ]]
