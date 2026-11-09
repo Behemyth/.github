@@ -1,0 +1,31 @@
+{
+  "problemMatcher": [
+    {
+      "owner": "synodic-clang",
+      "pattern": [
+        {
+          "regexp": "^([^\"\\r\\n<>|]+?):(\\d+):(\\d+):\\s*(?:fatal )?(error|warning):\\s*(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "message": 5
+        }
+      ]
+    },
+    {
+      "owner": "synodic-msvc",
+      "pattern": [
+        {
+          "regexp": "^(.*?)\\((\\d+)(?:,(\\d+))?\\)\\s*:\\s*(?:fatal )?(error|warning)\\s+([A-Z]+\\d+):\\s*(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "code": 5,
+          "message": 6
+        }
+      ]
+    }
+  ]
+}

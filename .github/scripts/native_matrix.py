@@ -13,12 +13,12 @@ from pathlib import Path
 from typing import Any
 
 REGISTRY = {
-    "windows-x64-msvc": {"runner": "windows-2025-vs2026", "toolchain": "msvc", "single": True},
-    "windows-arm64-msvc": {"runner": "windows-11-vs2026-arm", "toolchain": "msvc", "single": False},
-    "linux-x64-clang-libcxx": {"runner": "ubuntu-26.04", "toolchain": "llvm-libcxx", "single": True},
-    "linux-arm64-clang-libcxx": {"runner": "ubuntu-26.04-arm", "toolchain": "llvm-libcxx", "single": False},
-    "linux-x64-clang-libcxx-sanitize": {"runner": "ubuntu-26.04", "toolchain": "llvm-libcxx", "single": True},
-    "macos-arm64-clang-libcxx": {"runner": "macos-26", "toolchain": "llvm-libcxx", "single": True},
+    "windows-x64-msvc": {"runner": "windows-2025-vs2026", "toolchain": "msvc"},
+    "windows-arm64-msvc": {"runner": "windows-11-vs2026-arm", "toolchain": "msvc"},
+    "linux-x64-clang-libcxx": {"runner": "ubuntu-26.04", "toolchain": "llvm-libcxx"},
+    "linux-arm64-clang-libcxx": {"runner": "ubuntu-26.04-arm", "toolchain": "llvm-libcxx"},
+    "linux-x64-clang-libcxx-sanitize": {"runner": "ubuntu-26.04", "toolchain": "llvm-libcxx"},
+    "macos-arm64-clang-libcxx": {"runner": "macos-26", "toolchain": "llvm-libcxx"},
 }
 _ARCHITECTURES = {
     "amd64": "x64",

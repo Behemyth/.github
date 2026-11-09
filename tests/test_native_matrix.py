@@ -44,7 +44,7 @@ class IdentityMatrixTests(unittest.TestCase):
         self.assertEqual([lane["identity"] for lane in result["include"]], self.selection)
         sanitizer = next(lane for lane in result["include"] if lane["identity"].endswith("-sanitize"))
         self.assertEqual(sanitizer["configurations"], ["debug"])
-        self.assertTrue(sanitizer["single"])
+        self.assertTrue(all("single" not in lane for lane in result["include"]))
 
     def test_python_caller_can_use_canonical_table_without_consumer_manifest(self):
         result = native_matrix.resolve_matrix(self.canonical, self.selection, mode="command")
@@ -133,6 +133,32 @@ class RunnerVerificationTests(unittest.TestCase):
 
 
 class WorkflowEnvironmentTests(unittest.TestCase):
+    def test_preflight_is_parallel_but_all_stages_gate_result(self):
+        workflow = (SCRIPT.parents[1] / "workflows" / "native-check.yml").read_text(encoding="utf-8")
+        preflight = workflow.split("\n  preflight:\n", 1)[1].split("\n  native:\n", 1)[0]
+        native = workflow.split("\n  native:\n", 1)[1].split("\n  ci-result:\n", 1)[0]
+        aggregate = workflow.split("\n  ci-result:\n", 1)[1]
+        self.assertNotIn("needs:", preflight)
+        self.assertIn("needs: preflight", native)
+        self.assertIn("fail-fast: false", native)
+        self.assertIn("needs: [fast, preflight, native]", aggregate)
+        self.assertNotIn("matrix.single", native)
+        self.assertIn("--configurations $CONFIGURATIONS", native)
+        self.assertNotIn("schedule:", workflow)
+        template = (SCRIPT.parents[2] / "workflow-templates" / "native-check.yml").read_text(encoding="utf-8")
+        self.assertNotIn("\n  push:", template)
+        self.assertNotIn("\n  schedule:", template)
+
+    def test_dev_drive_workspace_is_used_by_commands_and_package_cache(self):
+        workflow = (SCRIPT.parents[1] / "workflows" / "native-check.yml").read_text(encoding="utf-8")
+        native = workflow.split("\n  native:\n", 1)[1].split("\n  ci-result:\n", 1)[0]
+        self.assertIn("workspace-copy: true", native)
+        self.assertIn("working-directory: ${{ env.NATIVE_WORKSPACE }}", native)
+        self.assertIn('NATIVE_WORKSPACE=$env:DEV_DRIVE_WORKSPACE', native)
+        self.assertIn("path: ${{ env.CONAN_HOME }}/p", native)
+        self.assertNotIn("path: ${{ runner.temp }}/conan-home/p", native)
+        self.assertIn("Get-Volume -FilePath $env:DEV_DRIVE_WORKSPACE", native)
+
     def test_project_identity_is_scoped_to_cmake_preparation(self):
         workflow = (SCRIPT.parents[1] / "workflows" / "native-check.yml").read_text(encoding="utf-8")
         native_job = workflow.split("\n  native:\n", 1)[1].split("\n  ci-result:\n", 1)[0]

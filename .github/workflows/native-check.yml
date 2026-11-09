@@ -16,7 +16,7 @@ on:
         type: string
         default: pdm install
       fast-command:
-        description: Cheap checks that must pass before native lanes start.
+        description: Cheap checks required alongside the native lanes.
         type: string
         required: true
       fast-uses-cmake:
@@ -204,7 +204,6 @@ jobs:
 
   preflight:
     name: matrix preflight
-    needs: fast
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
@@ -268,17 +267,24 @@ jobs:
     timeout-minutes: 90
     env:
       NATIVE_IDENTITY: ${{ matrix.identity }}
+      NATIVE_TOOLCHAIN: ${{ matrix.toolchain }}
+      NATIVE_WORKSPACE: ${{ github.workspace }}
+    defaults:
+      run:
+        working-directory: ${{ env.NATIVE_WORKSPACE }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
 
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Checkout this workflow's exact revision
+        id: workflow-checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -286,19 +292,51 @@ jobs:
           path: .native-workflow
           persist-credentials: false
 
+      - name: Create Windows Dev Drive
+        id: dev-drive
+        if: runner.os == 'Windows'
+        uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4
+        with:
+          drive-size: 16GB
+          drive-path: ${{ runner.temp }}\native-dev-drive.vhdx
+          workspace-copy: true
+          native-dev-drive: true
+          trusted-dev-drive: true
+
+      - name: Select Windows Dev Drive workspace
+        id: workspace
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $volume = Get-Volume -FilePath $env:DEV_DRIVE_WORKSPACE
+          if ($volume.FileSystem -ne 'ReFS') { throw 'The Windows native workspace is not on ReFS.' }
+          fsutil devdrv query $env:DEV_DRIVE_WORKSPACE
+          if ($LASTEXITCODE -ne 0) { throw 'The Windows native workspace is not on a Dev Drive.' }
+          "NATIVE_WORKSPACE=$env:DEV_DRIVE_WORKSPACE" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CONAN_HOME=$(Join-Path $env:DEV_DRIVE 'conan-home')" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          git config --global --add safe.directory $env:DEV_DRIVE_WORKSPACE
+
+      - name: Register compiler problem matchers
+        id: matchers
+        shell: bash
+        run: echo "::add-matcher::$NATIVE_WORKSPACE/.native-workflow/.github/matchers/native.json"
+
       - name: Install PDM
+        id: pdm
         uses: pdm-project/setup-pdm@544d7237314ee09c256785bd360f6b30add38b37 # v4
         with:
           python-version: ${{ inputs.python-version }}
           cache: true
 
       - name: Install pinned CMake
+        id: cmake-setup
         shell: bash
         env:
           CMAKE_VERSION: ${{ inputs.cmake-version }}
         run: *install-cmake
 
       - name: Install upstream LLVM on Ubuntu
+        id: llvm-linux
         if: matrix.toolchain == 'llvm-libcxx' && runner.os == 'Linux'
         shell: bash
         env:
@@ -326,6 +364,7 @@ jobs:
           echo "/usr/lib/llvm-${LLVM_VERSION}/bin" >> "$GITHUB_PATH"
 
       - name: Install upstream LLVM on macOS
+        id: llvm-macos
         if: matrix.toolchain == 'llvm-libcxx' && runner.os == 'macOS'
         shell: bash
         env:
@@ -355,6 +394,7 @@ jobs:
           echo "$root/bin" >> "$GITHUB_PATH"
 
       - name: Load MSVC developer environment
+        id: msvc
         if: matrix.toolchain == 'msvc'
         shell: pwsh
         run: |
@@ -386,6 +426,7 @@ jobs:
           "CARGO_TARGET_$($target.Triple)_PC_WINDOWS_MSVC_LINKER=$linker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Verify runner and compiler identity
+        id: identity
         shell: bash
         env:
           EXPECTED_OS: ${{ matrix.os }}
@@ -399,6 +440,7 @@ jobs:
             --llvm-version "$LLVM_VERSION"
 
       - name: Configure isolated Conan profile
+        id: conan-profile
         shell: bash
         env:
           LLVM_VERSION: ${{ inputs.llvm-version }}
@@ -410,7 +452,7 @@ jobs:
           import platform
           from pathlib import Path
 
-          home = Path(os.environ["RUNNER_TEMP"]) / "conan-home"
+          home = Path(os.environ["CONAN_HOME"]) if "CONAN_HOME" in os.environ else Path(os.environ["RUNNER_TEMP"]) / "conan-home"
           profiles = home / "profiles"
           profiles.mkdir(parents=True, exist_ok=True)
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
@@ -466,55 +508,57 @@ jobs:
         id: conan-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/conan-home/p
+          path: ${{ env.CONAN_HOME }}/p
           key: conan-${{ matrix.identity }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('conanfile*.py', 'pyproject.toml', 'pdm.lock') }}
           restore-keys: |
             conan-${{ matrix.identity }}-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install dependencies
+        id: install
         shell: bash
-        run: ${{ inputs.native-install }}
+        env:
+          NATIVE_CHECK_COMMAND: ${{ inputs.native-install }}
+        run: python .native-workflow/.github/scripts/native_check.py run --stage install
 
       - name: Prepare native dependencies
+        id: prepare
         if: inputs.native-mode == 'cmake'
         shell: bash
         env:
           CPPYTHON_IDENTITY: ${{ matrix.identity }}
-        run: ${{ inputs.native-prepare }}
+          NATIVE_CHECK_COMMAND: ${{ inputs.native-prepare }}
+        run: python .native-workflow/.github/scripts/native_check.py run --stage prepare
 
-      - name: Run multi-config CMake workflow
+      - name: Run committed CMake steps and single-config configure checks
+        id: cmake
         if: inputs.native-mode == 'cmake'
-        shell: bash
-        run: pdm run "$CMAKE_BINARY" --workflow --preset "$NATIVE_IDENTITY"
-
-      - name: Run representative single-config CMake workflows
-        if: inputs.native-mode == 'cmake' && matrix.single
         shell: bash
         env:
           CONFIGURATIONS: ${{ join(matrix.configurations, ' ') }}
-        run: |
-          set -euo pipefail
-          for configuration in $CONFIGURATIONS; do
-            pdm run "$CMAKE_BINARY" --workflow --preset "$NATIVE_IDENTITY-$configuration"
-          done
+        run: pdm run python .native-workflow/.github/scripts/native_check.py cmake --configurations $CONFIGURATIONS
 
       - name: Run project-wide native command
+        id: native-command
         if: inputs.native-mode == 'command'
         shell: bash
-        run: ${{ inputs.native-command }}
+        env:
+          NATIVE_CHECK_COMMAND: ${{ inputs.native-command }}
+        run: python .native-workflow/.github/scripts/native_check.py run --stage native-command
 
       # Only manual runs on the default branch save, so PR and merge-queue runs can't seed the shared cache.
       - name: Save Conan package cache
+        id: conan-cache-save
         if: >-
           success() && github.event_name == 'workflow_dispatch'
           && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
           && steps.conan-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/conan-home/p
+          path: ${{ env.CONAN_HOME }}/p
           key: ${{ steps.conan-cache.outputs.cache-primary-key }}
 
       - name: Summarize native lane
+        id: tool-summary
         if: always()
         shell: bash
         env:
@@ -556,6 +600,22 @@ jobs:
               fi
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish structured native result
+        if: always()
+        shell: bash
+        env:
+          NATIVE_STEP_RESULTS: ${{ toJSON(steps) }}
+        run: python .native-workflow/.github/scripts/native_check.py report --job-status "${{ job.status }}"
+
+      - name: Upload native diagnostics
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: native-${{ matrix.identity }}-${{ github.run_attempt }}
+          path: ${{ env.NATIVE_WORKSPACE }}/build/native-check/${{ matrix.identity }}
+          if-no-files-found: error
+          retention-days: 7
 
   ci-result:
     name: ci-result
