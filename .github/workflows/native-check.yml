@@ -360,8 +360,8 @@ jobs:
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $target = switch ($env:RUNNER_ARCH) {
-            'X64' { @{ Component = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'; Script = 'vcvars64.bat' } }
-            'ARM64' { @{ Component = 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'; Script = 'vcvarsarm64.bat' } }
+            'X64' { @{ Component = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'; Script = 'vcvars64.bat'; Host = 'x64'; Triple = 'X86_64' } }
+            'ARM64' { @{ Component = 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'; Script = 'vcvarsarm64.bat'; Host = 'arm64'; Triple = 'AARCH64' } }
             default { throw "Unsupported Windows runner architecture: $env:RUNNER_ARCH" }
           }
           $installation = & $vswhere -latest -prerelease -products * -requires $target.Component -property installationPath
@@ -376,7 +376,14 @@ jobs:
             if ($name -and $before[$name] -ne $value) {
               "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
             }
+            if ($name -eq 'VCToolsInstallDir') { $toolsDir = $value }
           }
+          # Bash steps put Git's /usr/bin/link ahead of MSVC, which breaks Rust builds of Python wheels.
+          if (-not $toolsDir) { throw "$($target.Script) did not set VCToolsInstallDir" }
+          $hostDir = "Host$($target.Host)"
+          $linker = Join-Path $toolsDir "bin\$hostDir\$($target.Host)\link.exe"
+          if (-not (Test-Path -LiteralPath $linker)) { throw "MSVC linker not found: $linker" }
+          "CARGO_TARGET_$($target.Triple)_PC_WINDOWS_MSVC_LINKER=$linker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Verify runner and compiler identity
         shell: bash
