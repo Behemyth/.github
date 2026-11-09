@@ -320,7 +320,8 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/apt.llvm.org.list >/dev/null
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            "clang-${LLVM_VERSION}" "libc++-${LLVM_VERSION}-dev" "libc++abi-${LLVM_VERSION}-dev" "lld-${LLVM_VERSION}"
+            "clang-${LLVM_VERSION}" "libc++-${LLVM_VERSION}-dev" "libc++abi-${LLVM_VERSION}-dev" "lld-${LLVM_VERSION}" \
+            "libclang-rt-${LLVM_VERSION}-dev"
           echo "LLVM_ROOT=/usr/lib/llvm-${LLVM_VERSION}" >> "$GITHUB_ENV"
           echo "/usr/lib/llvm-${LLVM_VERSION}/bin" >> "$GITHUB_PATH"
 
@@ -344,6 +345,13 @@ jobs:
             exit 1
           fi
           echo "LLVM_ROOT=$root" >> "$GITHUB_ENV"
+          # Homebrew installs the manifest beside its libc++, where clang -print-file-name does not search.
+          modules_json="$root/lib/c++/libc++.modules.json"
+          if [[ ! -f "$modules_json" ]]; then
+            echo "Homebrew $formula does not provide $modules_json" >&2
+            exit 1
+          fi
+          echo "SYNODIC_CXX_STDLIB_MODULES_JSON=$modules_json" >> "$GITHUB_ENV"
           echo "$root/bin" >> "$GITHUB_PATH"
 
       - name: Load MSVC developer environment
