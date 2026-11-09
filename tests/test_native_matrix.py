@@ -132,5 +132,20 @@ class RunnerVerificationTests(unittest.TestCase):
             native_matrix.verify_runner("windows-x64-msvc", "windows", "x64", "msvc", "23")
 
 
+class WorkflowEnvironmentTests(unittest.TestCase):
+    def test_project_identity_is_scoped_to_cmake_preparation(self):
+        workflow = (SCRIPT.parents[1] / "workflows" / "native-check.yml").read_text(encoding="utf-8")
+        native_job = workflow.split("\n  native:\n", 1)[1].split("\n  ci-result:\n", 1)[0]
+        job_header = native_job.split("\n    steps:\n", 1)[0]
+        preparation = native_job.split("      - name: Prepare native dependencies\n", 1)[1].split(
+            "\n      - name:", 1
+        )[0]
+        self.assertIn("NATIVE_IDENTITY: ${{ matrix.identity }}", job_header)
+        self.assertNotIn("CPPYTHON_IDENTITY:", job_header)
+        self.assertIn("if: inputs.native-mode == 'cmake'", preparation)
+        self.assertIn("CPPYTHON_IDENTITY: ${{ matrix.identity }}", preparation)
+        self.assertEqual(native_job.count("CPPYTHON_IDENTITY:"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

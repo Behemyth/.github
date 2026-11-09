@@ -267,7 +267,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
-      CPPYTHON_IDENTITY: ${{ matrix.identity }}
+      NATIVE_IDENTITY: ${{ matrix.identity }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
@@ -379,7 +379,7 @@ jobs:
           LLVM_VERSION: ${{ inputs.llvm-version }}
         run: |
           python .native-workflow/.github/scripts/native_matrix.py verify \
-            --identity "$CPPYTHON_IDENTITY" --os "$EXPECTED_OS" \
+            --identity "$NATIVE_IDENTITY" --os "$EXPECTED_OS" \
             --arch "$EXPECTED_ARCH" --compiler "$EXPECTED_COMPILER" \
             --llvm-version "$LLVM_VERSION"
 
@@ -463,12 +463,14 @@ jobs:
       - name: Prepare native dependencies
         if: inputs.native-mode == 'cmake'
         shell: bash
+        env:
+          CPPYTHON_IDENTITY: ${{ matrix.identity }}
         run: ${{ inputs.native-prepare }}
 
       - name: Run multi-config CMake workflow
         if: inputs.native-mode == 'cmake'
         shell: bash
-        run: pdm run "$CMAKE_BINARY" --workflow --preset "$CPPYTHON_IDENTITY"
+        run: pdm run "$CMAKE_BINARY" --workflow --preset "$NATIVE_IDENTITY"
 
       - name: Run representative single-config CMake workflows
         if: inputs.native-mode == 'cmake' && matrix.single
@@ -478,7 +480,7 @@ jobs:
         run: |
           set -euo pipefail
           for configuration in $CONFIGURATIONS; do
-            pdm run "$CMAKE_BINARY" --workflow --preset "$CPPYTHON_IDENTITY-$configuration"
+            pdm run "$CMAKE_BINARY" --workflow --preset "$NATIVE_IDENTITY-$configuration"
           done
 
       - name: Run project-wide native command
