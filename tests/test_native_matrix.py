@@ -251,6 +251,9 @@ class WorkflowEnvironmentTests(unittest.TestCase):
                 " && steps.conan-cache.outputs.cache-hit != 'true'",
             )
         self.assertNotIn("merge_group", native)
+        # A step's default directory stays on the original checkout, which has no project environment on Windows.
+        trim = native.split("      - name: Trim the Conan package cache\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertLess(trim.index('cd "$NATIVE_WORKSPACE"'), trim.index("pdm run conan cache clean"))
 
 
 if __name__ == "__main__":

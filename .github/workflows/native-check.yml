@@ -582,6 +582,8 @@ jobs:
           && steps.conan-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
+          # On Windows the project environment is in the Dev Drive copy, not this step's directory.
+          cd "$NATIVE_WORKSPACE"
           if [[ -d "$CONAN_HOME/p" ]]; then
             pdm run conan cache clean "*" --source --build --download --temp
           fi
