@@ -74,6 +74,55 @@ def load_canonical(configuration: Path) -> dict[str, dict[str, Any]]:
     return _identity_table(tomllib.loads(template.render()), str(configuration))
 
 
+def configuration_ref(answers: Path, repository: str, ref: str) -> str:
+    """Prefer an explicit ref, then the template revision Copier recorded in the caller."""
+    if ref:
+        return ref
+    recorded: dict[str, str] = {}
+    if answers.is_file():
+        for line in answers.read_text(encoding="utf-8").splitlines():
+            match = re.fullmatch(r"(_commit|_src_path):\s*(['\"]?)([^'\"#\s]+)\2\s*", line)
+            if match:
+                recorded[match.group(1)] = match.group(3)
+    if "_commit" not in recorded:
+        raise ValueError(f"No configuration ref was given and {answers} records no template revision")
+    source = recorded.get("_src_path", "")
+    match = re.fullmatch(r"(?:gh:|https://github\.com/)([^/]+/[^/]+?)(?:\.git)?/?", source)
+    if match is None or match.group(1).casefold() != repository.casefold():
+        raise ValueError(f"{answers} was rendered from {source!r}, but this workflow reads {repository}")
+    return recorded["_commit"]
+
+
+def checkout_configuration(repository: str, ref: str, destination: Path) -> str:
+    """Check out a branch, tag, or full or abbreviated commit, and return the full commit."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repository):
+        raise ValueError(f"Invalid configuration repository: {repository!r}")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]*", ref):
+        raise ValueError(f"Invalid configuration ref: {ref!r}")
+
+    def git(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *arguments], capture_output=True, text=True, check=False)
+
+    clone = git("clone", "--quiet", "--no-checkout", f"https://github.com/{repository}.git", str(destination))
+    if clone.returncode != 0:
+        raise ValueError(f"Cannot clone {repository}: {clone.stderr.strip()}")
+    for candidate in (ref, f"origin/{ref}"):
+        resolved = git("-C", str(destination), "rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}")
+        if resolved.returncode == 0:
+            commit = resolved.stdout.strip()
+            break
+    else:
+        # A pinned commit may no longer be on any branch; GitHub still serves it by full name.
+        fetched = git("-C", str(destination), "fetch", "--quiet", "origin", ref)
+        if not re.fullmatch(r"[0-9a-f]{40}", ref) or fetched.returncode != 0:
+            raise ValueError(f"{repository} has no revision {ref!r}")
+        commit = ref
+    checkout = git("-C", str(destination), "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", commit)
+    if checkout.returncode != 0:
+        raise ValueError(f"Cannot check out {repository}@{commit}: {checkout.stderr.strip()}")
+    return commit
+
+
 def resolve_matrix(
     canonical: dict[str, dict[str, Any]],
     selection: Any,
@@ -83,7 +132,10 @@ def resolve_matrix(
     consumer: dict[str, dict[str, Any]] | None = None,
     mode: str = "cmake",
 ) -> dict[str, list[dict[str, Any]]]:
-    """Validate identities and return the matrix GitHub Actions consumes."""
+    """Validate identities and return the matrix GitHub Actions consumes.
+
+    A selection of None means every identity in the canonical table.
+    """
     if mode not in {"cmake", "command"}:
         raise ValueError(f"Unknown native mode: {mode!r}")
     if set(canonical) != set(REGISTRY):
@@ -95,6 +147,8 @@ def resolve_matrix(
         raise ValueError("A CMake caller must commit tool/identities.toml")
     if consumer is not None and consumer != canonical:
         raise ValueError("The caller's identity table differs from the canonical configuration table")
+    if selection is None:
+        selection = list(canonical)
     if not isinstance(selection, list) or not selection or not all(isinstance(value, str) for value in selection):
         raise ValueError("Native identities must be a nonempty JSON array of names")
     if len(selection) != len(set(selection)):
@@ -170,7 +224,7 @@ def main() -> None:
     resolve = subcommands.add_parser("resolve")
     resolve.add_argument("--configuration", type=Path, required=True)
     resolve.add_argument("--consumer", type=Path)
-    resolve.add_argument("--selection", required=True)
+    resolve.add_argument("--selection", default="", help="JSON array of identities; empty selects every identity.")
     resolve.add_argument("--target", default="")
     resolve.add_argument("--targeted", choices=("true", "false"), default="false")
     resolve.add_argument("--mode", required=True)
@@ -180,9 +234,19 @@ def main() -> None:
     verify.add_argument("--arch", required=True)
     verify.add_argument("--compiler", required=True)
     verify.add_argument("--llvm-version", required=True)
+    configuration = subcommands.add_parser("configuration")
+    configuration.add_argument("--repository", required=True)
+    configuration.add_argument("--ref", default="")
+    configuration.add_argument("--answers", type=Path, required=True)
+    configuration.add_argument("--destination", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "verify":
         verify_runner(args.identity, args.os, args.arch, args.compiler, args.llvm_version)
+        return
+    if args.command == "configuration":
+        ref = configuration_ref(args.answers, args.repository, args.ref.strip())
+        commit = checkout_configuration(args.repository, ref, args.destination)
+        print(f"Canonical configuration: {args.repository}@{commit} (from {ref})")
         return
 
     canonical = load_canonical(args.configuration)
@@ -191,7 +255,7 @@ def main() -> None:
         consumer = _identity_table(tomllib.loads(args.consumer.read_text(encoding="utf-8")), str(args.consumer))
     matrix = resolve_matrix(
         canonical,
-        json.loads(args.selection),
+        json.loads(args.selection) if args.selection.strip() else None,
         target=args.target,
         targeted=args.targeted == "true",
         consumer=consumer,

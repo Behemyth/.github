@@ -271,11 +271,14 @@ def report(
     if job_status == "cancelled":
         status = "cancelled"
     cmake_lane = any(stage["stage"] == "configure-multi" for stage in stages)
+    exported = output / "first-party.json"
+    first_party = json.loads(exported.read_text(encoding="utf-8"))["packages"] if exported.is_file() else []
     result = {
         "schema_version": 1, "identity": identity, "toolchain": toolchain,
         "revision": os.environ.get("GITHUB_SHA"), "status": status,
         "job_status_at_report": job_status, "failed_stage": failed,
         "workflow_steps": outcomes, "stages": stages, "diagnostics": diagnostics,
+        "first_party": first_party,
         "reproduction": {
             "environment": {"CPPYTHON_IDENTITY": identity} if cmake_lane else {},
             "commands": (["pdm run prepare", f"cmake --workflow --preset {identity}"]
@@ -294,6 +297,13 @@ def report(
         lines.append(f"- Failed stage: `{failed}`")
     lines += ["", "| Stage | Result | Seconds |", "| --- | --- | ---: |"]
     lines += [f"| {stage['stage']} | {stage['status']} | {stage['duration_seconds']} |" for stage in stages]
+    if first_party:
+        lines += ["", "First-party packages exported from pinned commits:", "",
+                  "| Package | Repository | Commit | Recipe |", "| --- | --- | --- | --- |"]
+        lines += [
+            f"| {item['name']} | {item['repository']} | `{item['commit']}` | `{item['reference']}` |"
+            for item in first_party
+        ]
     if diagnostics:
         lines += ["", "First source diagnostics:", "", "```text"]
         lines += [

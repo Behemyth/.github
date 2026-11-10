@@ -1,4 +1,5 @@
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +51,15 @@ class IdentityMatrixTests(unittest.TestCase):
         result = native_matrix.resolve_matrix(self.canonical, self.selection, mode="command")
         self.assertEqual(len(result["include"]), 6)
 
+    def test_an_omitted_selection_runs_every_canonical_identity(self):
+        result = native_matrix.resolve_matrix(self.canonical, None, consumer=self.canonical)
+        self.assertEqual([lane["identity"] for lane in result["include"]], list(self.canonical))
+        target = self.selection[1]
+        targeted = native_matrix.resolve_matrix(
+            self.canonical, None, target=target, targeted=True, consumer=self.canonical
+        )
+        self.assertEqual([lane["identity"] for lane in targeted["include"]], [target])
+
     def test_cmake_caller_must_commit_matching_manifest(self):
         with self.assertRaisesRegex(ValueError, "must commit"):
             native_matrix.resolve_matrix(self.canonical, self.selection)
@@ -90,6 +100,47 @@ class IdentityMatrixTests(unittest.TestCase):
         row = next(iter(self.canonical.values()))
         with self.assertRaisesRegex(ValueError, "duplicate identity"):
             native_matrix._identity_table({"version": 1, "identities": [row, row]}, "test")
+
+
+class ConfigurationSourceTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.answers = Path(temporary.name) / ".copier-answers.yml"
+
+    def record(self, source="gh:Behemyth/configuration", commit="38c8d01"):
+        self.answers.write_text(
+            "# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY\n"
+            f"_commit: {commit}\n_src_path: {source}\nuse_cmake_presets: true\n",
+            encoding="utf-8",
+        )
+
+    def test_an_explicit_ref_needs_no_answers_file(self):
+        self.assertEqual(native_matrix.configuration_ref(self.answers, "Behemyth/configuration", "abc"), "abc")
+
+    def test_the_recorded_template_revision_is_the_default(self):
+        for source in ("gh:Behemyth/configuration", "https://github.com/behemyth/configuration.git"):
+            for commit, expected in (("38c8d01", "38c8d01"), ("'1234567'", "1234567"), ("v1.0-2-g38c8d01", "v1.0-2-g38c8d01")):
+                with self.subTest(source=source, commit=commit):
+                    self.record(source, commit)
+                    self.assertEqual(
+                        native_matrix.configuration_ref(self.answers, "Behemyth/configuration", ""), expected
+                    )
+
+    def test_missing_or_foreign_provenance_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "records no template revision"):
+            native_matrix.configuration_ref(self.answers, "Behemyth/configuration", "")
+        self.record("gh:synodic/configuration")
+        with self.assertRaisesRegex(ValueError, "rendered from 'gh:synodic/configuration'"):
+            native_matrix.configuration_ref(self.answers, "Behemyth/configuration", "")
+
+    def test_unsafe_repository_and_ref_values_are_rejected_before_git_runs(self):
+        with patch.object(native_matrix.subprocess, "run") as run:
+            for repository, ref in (("Behemyth/configuration", "--upload-pack=x"), ("../configuration", "main"),
+                                    ("Behemyth/configuration", "a b"), ("-x/configuration", "main")):
+                with self.subTest(repository=repository, ref=ref), self.assertRaisesRegex(ValueError, "Invalid"):
+                    native_matrix.checkout_configuration(repository, ref, self.answers.parent / "checkout")
+            run.assert_not_called()
 
 
 class RunnerVerificationTests(unittest.TestCase):
@@ -171,6 +222,35 @@ class WorkflowEnvironmentTests(unittest.TestCase):
         self.assertIn("if: inputs.native-mode == 'cmake'", preparation)
         self.assertIn("CPPYTHON_IDENTITY: ${{ matrix.identity }}", preparation)
         self.assertEqual(native_job.count("CPPYTHON_IDENTITY:"), 1)
+
+    def test_pinned_recipes_are_validated_early_and_exported_before_preparation(self):
+        workflow = (SCRIPT.parents[1] / "workflows" / "native-check.yml").read_text(encoding="utf-8")
+        preflight = workflow.split("\n  preflight:\n", 1)[1].split("\n  native:\n", 1)[0]
+        native = workflow.split("\n  native:\n", 1)[1].split("\n  ci-result:\n", 1)[0]
+        self.assertIn("first_party.py validate", preflight)
+        steps = [line.strip() for line in native.splitlines() if line.startswith("      - name:")]
+        order = [steps.index(f"- name: {name}") for name in (
+            "Restore Conan package cache", "Install dependencies",
+            "Export pinned first-party recipes", "Prepare native dependencies",
+        )]
+        self.assertEqual(order, sorted(order))
+        export = native.split("      - name: Export pinned first-party recipes\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("if: hashFiles('tool/first-party.toml') != ''", export)
+        self.assertIn("--stage first-party", export)
+        self.assertIn("'tool/first-party.toml') }}", native.split("Restore Conan package cache", 1)[1])
+
+    def test_only_pull_request_and_manual_runs_save_the_package_cache(self):
+        workflow = (SCRIPT.parents[1] / "workflows" / "native-check.yml").read_text(encoding="utf-8")
+        native = workflow.split("\n  native:\n", 1)[1].split("\n  ci-result:\n", 1)[0]
+        for name in ("Trim the Conan package cache", "Save Conan package cache"):
+            step = native.split(f"      - name: {name}\n", 1)[1].split("\n      - name:", 1)[0]
+            condition = " ".join(step.split("if: >-\n", 1)[1].split("\n        shell:")[0].split("\n        uses:")[0].split())
+            self.assertEqual(
+                condition,
+                "success() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')"
+                " && steps.conan-cache.outputs.cache-hit != 'true'",
+            )
+        self.assertNotIn("merge_group", native)
 
 
 if __name__ == "__main__":
