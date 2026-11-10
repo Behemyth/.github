@@ -575,10 +575,13 @@ jobs:
         run: python .native-workflow/.github/scripts/native_check.py run --shell "$BASH" --stage native-command
 
       # Pull-request and manual runs save for their own ref. The merge queue never saves.
+      # Prepared dependencies are worth keeping even when the project's own build or tests then fail.
       - name: Trim the Conan package cache
         id: conan-cache-trim
         if: >-
-          success() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+          !cancelled()
+          && (steps.prepare.outcome == 'success' || (inputs.native-mode != 'cmake' && success()))
+          && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
           && steps.conan-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
@@ -591,7 +594,9 @@ jobs:
       - name: Save Conan package cache
         id: conan-cache-save
         if: >-
-          success() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+          !cancelled()
+          && (steps.prepare.outcome == 'success' || (inputs.native-mode != 'cmake' && success()))
+          && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
           && steps.conan-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

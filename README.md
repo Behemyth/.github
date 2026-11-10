@@ -40,7 +40,9 @@ Each native lane verifies its runner and compiler against the selected identity.
 Every native lane gets an isolated `CONAN_HOME`; `llvm-libcxx` lanes receive explicit Clang/libc++ Conan profiles.
 Each lane restores its Conan package cache. Pull-request and manual runs save
 it for their own branch or pull request, after removing source, build, and
-download folders. Merge-queue runs never save. GitHub shows a cache only to the
+download folders. A CMake lane saves once its dependencies are prepared, even
+if the project's own build or tests then fail, so a fix does not rebuild them.
+Merge-queue runs never save. GitHub shows a cache only to the
 ref that saved it, except that every ref can read the default branch's caches.
 No scheduled warming, compiler cache, or dependency service is added.
 The workflow never receives publishing credentials, and fork pull requests run without secrets.

@@ -247,7 +247,9 @@ class WorkflowEnvironmentTests(unittest.TestCase):
             condition = " ".join(step.split("if: >-\n", 1)[1].split("\n        shell:")[0].split("\n        uses:")[0].split())
             self.assertEqual(
                 condition,
-                "success() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')"
+                "!cancelled()"
+                " && (steps.prepare.outcome == 'success' || (inputs.native-mode != 'cmake' && success()))"
+                " && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')"
                 " && steps.conan-cache.outputs.cache-hit != 'true'",
             )
         self.assertNotIn("merge_group", native)
