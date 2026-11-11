@@ -239,6 +239,32 @@ class WorkflowEnvironmentTests(unittest.TestCase):
         self.assertIn("--stage first-party", export)
         self.assertIn("'tool/first-party.toml') }}", native.split("Restore Conan package cache", 1)[1])
 
+    def test_project_setup_runs_after_install_and_before_preparation(self):
+        workflow = (SCRIPT.parents[1] / "workflows" / "native-check.yml").read_text(encoding="utf-8")
+        native = workflow.split("\n  native:\n", 1)[1].split("\n  ci-result:\n", 1)[0]
+        steps = [line.strip() for line in native.splitlines() if line.startswith("      - name:")]
+        order = [steps.index(f"- name: {name}") for name in (
+            "Install dependencies", "Run project native setup", "Prepare native dependencies",
+        )]
+        self.assertEqual(order, sorted(order))
+        setup = native.split("      - name: Run project native setup\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("if: hashFiles('tool/native-setup.py') != ''", setup)
+        self.assertIn("NATIVE_CHECK_COMMAND: pdm run python tool/native-setup.py", setup)
+        # The stage runner executes in the native workspace, where the project environment is on Windows.
+        self.assertIn("native_check.py run", setup)
+        self.assertIn("--stage setup", setup)
+
+    def test_linux_lanes_let_conan_install_system_packages(self):
+        workflow = (SCRIPT.parents[1] / "workflows" / "native-check.yml").read_text(encoding="utf-8")
+        native = workflow.split("\n  native:\n", 1)[1].split("\n  ci-result:\n", 1)[0]
+        profile = native.split("      - name: Configure isolated Conan profile\n", 1)[1].split("\n      - name:", 1)[0]
+        linux = profile.split('if platform.system() == "Linux":', 1)[1].split("\n\n", 1)[0]
+        self.assertIn('home / "global.conf"', linux)
+        self.assertIn("tools.system.package_manager:mode=install", linux)
+        self.assertIn("tools.system.package_manager:sudo=True", linux)
+        # MSVC lanes leave the step early, so the policy must be written before that.
+        self.assertLess(profile.index('home / "global.conf"'), profile.index('if os.environ["TOOLCHAIN"] == "msvc":'))
+
     def test_only_pull_request_and_manual_runs_save_the_package_cache(self):
         workflow = (SCRIPT.parents[1] / "workflows" / "native-check.yml").read_text(encoding="utf-8")
         native = workflow.split("\n  native:\n", 1)[1].split("\n  ci-result:\n", 1)[0]

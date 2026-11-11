@@ -79,6 +79,26 @@ commit = "fcc7e81c1aa641a06e9770459d1b0b5ea7ce49b9"
 A repository without this file is unaffected. Delete the file and this step
 when a remote serves the packages.
 
+### Host prerequisites
+
+A runner image does not have everything a project needs. Two mechanisms fill
+the gap, and a repository that needs neither is unaffected.
+
+- **System packages.** Some Conan recipes stand for packages that the
+  operating system provides, such as the X11 libraries. On Linux lanes Conan
+  installs them with `sudo`. Windows and macOS lanes do not install system
+  packages.
+- **Project setup script.** A repository that needs anything else commits
+  `tool/native-setup.py`. Each lane runs it with `pdm run python` from the
+  project root, after installing the Python environment and before exporting
+  pins or preparing dependencies. A failure fails the lane.
+
+The setup script is for continuous integration only. It reads the lane from
+`NATIVE_IDENTITY` and passes results to later steps the way any Actions step
+does, by appending to the files named in `GITHUB_ENV` and `GITHUB_PATH`.
+Verify the checksum of anything it downloads. A developer machine gets the
+same prerequisites from the project's Porringer manifest instead.
+
 ### Native execution and storage
 
 The CI adapter reads the identity's committed workflow steps and executes the

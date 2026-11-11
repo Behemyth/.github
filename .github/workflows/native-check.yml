@@ -474,6 +474,13 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
               environment.write(f"CONAN_HOME={home}\n")
 
+          # Some recipes stand for system packages. A fresh runner has none of them, so Conan installs them.
+          if platform.system() == "Linux":
+              (home / "global.conf").write_text(
+                  "tools.system.package_manager:mode=install\ntools.system.package_manager:sudo=True\n",
+                  encoding="utf-8",
+              )
+
           if os.environ["TOOLCHAIN"] == "msvc":
               raise SystemExit(0)
           if os.environ["TOOLCHAIN"] != "llvm-libcxx":
@@ -535,6 +542,15 @@ jobs:
         env:
           NATIVE_CHECK_COMMAND: ${{ inputs.native-install }}
         run: python .native-workflow/.github/scripts/native_check.py run --shell "$BASH" --stage install
+
+      # A caller provides host prerequisites that the runner image lacks with its own script.
+      - name: Run project native setup
+        id: setup
+        if: hashFiles('tool/native-setup.py') != ''
+        shell: bash
+        env:
+          NATIVE_CHECK_COMMAND: pdm run python tool/native-setup.py
+        run: python .native-workflow/.github/scripts/native_check.py run --shell "$BASH" --stage setup
 
       # No remote serves first-party packages yet, so each lane exports their pinned recipes.
       - name: Export pinned first-party recipes
