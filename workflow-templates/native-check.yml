@@ -27,7 +27,7 @@ concurrency:
 jobs:
   check:
     if: github.event_name != 'workflow_dispatch'
-    uses: Behemyth/.github/.github/workflows/native-check.yml@feature/native-identity-matrix
+    uses: Behemyth/.github/.github/workflows/native-check.yml@build-identities
     with:
       fast-command: pdm run check-fast
       native-identities: &identities >-
@@ -37,7 +37,7 @@ jobs:
 
   development-check:
     if: github.event_name == 'workflow_dispatch'
-    uses: Behemyth/.github/.github/workflows/native-check.yml@feature/native-identity-matrix
+    uses: Behemyth/.github/.github/workflows/native-check.yml@build-identities
     with:
       fast-command: pdm run check-fast
       native-identities: *identities
